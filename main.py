@@ -3,23 +3,28 @@ import time
 
 import foxglove
 from foxglove.channels import CompressedVideoChannel
-from foxglove.schemas import CompressedVideo
-from foxglove.schemas import Timestamp
+from foxglove.schemas import CompressedVideo, Timestamp
 
 video_channel = CompressedVideoChannel("/video")
 
 
 def mjpeg_to_h264_stream(url):
     cmd = [
-        'ffmpeg',
-        '-i', url,
-        '-an',
-        '-c:v', 'libx264',
-        '-preset', 'ultrafast',
-        '-x264-params', 'keyint=30:min-keyint=30:scenecut=0:repeat-headers=1',
-        '-f', 'h264',
-        '-loglevel', 'quiet',
-        'pipe:1'
+        "ffmpeg",
+        "-i",
+        url,
+        "-an",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-x264-params",
+        "keyint=30:min-keyint=30:scenecut=0:repeat-headers=1",
+        "-f",
+        "h264",
+        "-loglevel",
+        "quiet",
+        "pipe:1",
     ]
 
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=10**7)
@@ -29,7 +34,7 @@ def mjpeg_to_h264_stream(url):
     access_unit = []
 
     def nal_type(nal):
-        return nal[4] & 0x1F  # first byte after start code & NAL mask
+        return nal[4] & 0x1F  # Extract NAL type from 1st byte after start code
 
     while True:
         chunk = process.stdout.read(4096)
@@ -47,24 +52,29 @@ def mjpeg_to_h264_stream(url):
 
             nal = buffer[first:second]
             buffer = buffer[second:]
-
             t = nal_type(nal)
 
-            # Group NALs into access units
-            if t in (1, 5):  # non-IDR or IDR slice → frame boundary
-                access_unit.append(nal)
-                # Emit all accumulated NALs as one CompressedVideo
-                frame_data = b"".join(access_unit)
-                time_now = Timestamp.from_epoch_secs(time.time())
-                msg = CompressedVideo(timestamp=time_now, data=frame_data, format="h264")
-                video_channel.log(msg)
-                yield msg
-                access_unit = []
-            elif t in (7, 8, 6):  # SPS, PPS, SEI — keep them for the next frame
-                access_unit.append(nal)
-            else:
-                # Other NAL types — optionally include
-                access_unit.append(nal)
+            # If this is a new slice, flush previous access unit first
+            if t in (1, 5):  # non-IDR or IDR
+                if access_unit:
+                    frame_data = b"".join(access_unit)
+                    timestamp = Timestamp.from_epoch_secs(time.time())
+                    msg = CompressedVideo(
+                        timestamp=timestamp, data=frame_data, format="h264"
+                    )
+                    video_channel.log(msg)
+                    yield msg
+                    access_unit = []
+
+            access_unit.append(nal)
+
+    # Flush final frame
+    if access_unit:
+        frame_data = b"".join(access_unit)
+        timestamp = Timestamp.from_epoch_secs(time.time())
+        msg = CompressedVideo(timestamp=timestamp, data=frame_data, format="h264")
+        video_channel.log(msg)
+        yield msg
 
     process.stdout.close()
     process.wait()
