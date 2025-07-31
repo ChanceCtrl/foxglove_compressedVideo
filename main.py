@@ -9,8 +9,17 @@ from foxglove.schemas import CompressedVideo, Timestamp
 video_channel = CompressedVideoChannel("/video")
 
 
+def nal_type(nal):
+    # Supports both 3-byte and 4-byte start codes
+    if nal.startswith(b"\x00\x00\x00\x01"):
+        return nal[4] & 0x1F
+    elif nal.startswith(b"\x00\x00\x01"):
+        return nal[3] & 0x1F
+    return None
+
+
 def extract_nal_units(buffer):
-    # Match both 3-byte and 4-byte start codes using a lookahead regex
+    # Match 3 or 4 byte start codes, but always normalize to 4-byte start code in output NAL units
     pattern = re.compile(b"(?=(\x00\x00\x01|\x00\x00\x00\x01))")
     starts = [m.start() for m in pattern.finditer(buffer)]
     nal_units = []
@@ -19,23 +28,19 @@ def extract_nal_units(buffer):
         start = starts[i]
         end = starts[i + 1] if i + 1 < len(starts) else len(buffer)
         nal = buffer[start:end]
+
+        # Normalize start code to 4 bytes
+        if nal.startswith(b"\x00\x00\x01"):
+            nal = b"\x00" + nal  # prepend zero to make 4-byte start code
+
         if len(nal) > 4:
             nal_units.append(nal)
 
-    # Return NALs and the buffer tail (could be incomplete NAL)
+    # Return NALs and tail buffer (could be incomplete)
     if starts:
         return nal_units, buffer[starts[-1] :]
     else:
         return [], buffer
-
-
-def nal_type(nal):
-    # Supports both 3-byte and 4-byte start codes
-    if nal.startswith(b"\x00\x00\x00\x01"):
-        return nal[4] & 0x1F
-    elif nal.startswith(b"\x00\x00\x01"):
-        return nal[3] & 0x1F
-    return None
 
 
 def mjpeg_to_h264_stream(url):
@@ -77,13 +82,16 @@ def mjpeg_to_h264_stream(url):
     access_unit = []
 
     def flush_frame():
+        nonlocal access_unit
         if access_unit:
             full_data = b"".join(access_unit)
             ts = Timestamp.from_epoch_secs(time.time())
-            msg = CompressedVideo(timestamp=ts, data=full_data, format="h264")
+            msg = CompressedVideo(
+                timestamp=ts, frame_id="camera", data=full_data, format="h264"
+            )
             video_channel.log(msg)
             yield msg
-            access_unit.clear()
+        access_unit = []
 
     while True:
         chunk = process.stdout.read(4096)
@@ -95,27 +103,38 @@ def mjpeg_to_h264_stream(url):
 
         for nal in nal_units:
             t = nal_type(nal)
+            if t is None:
+                continue
             print(f"NAL prefix: {nal[:5].hex()} → type: {t}")
 
-            if t == 7:
+            if t == 7:  # SPS
                 sps = nal
-            elif t == 8:
+                continue
+            elif t == 8:  # PPS
                 pps = nal
-            elif t == 5:  # IDR
-                # Flush previous access unit
+                continue
+            elif t == 9:  # AUD
+                # flush current frame on AUD
                 yield from flush_frame()
-                print("🎯 IDR frame found")
+                # skip AUD itself
+                continue
+            elif t == 6:  # SEI
+                # skip SEI to avoid issues
+                continue
+            elif t == 5:  # IDR keyframe
+                # flush any previous frame first
+                yield from flush_frame()
+                # prepend SPS and PPS to keyframe
                 access_unit.extend(filter(None, [sps, pps]))
                 access_unit.append(nal)
-            elif t == 1:  # P/B slice
-                # Flush previous access unit
+                # flush this keyframe immediately
                 yield from flush_frame()
-                access_unit.append(nal)
+                continue
             else:
-                # Other NALs (SEI, AUD, etc.)
+                # non-IDR VCL or other NALs
                 access_unit.append(nal)
 
-    # Final flush
+    # Final flush on end of stream
     yield from flush_frame()
 
     process.stdout.close()
