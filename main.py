@@ -56,10 +56,10 @@ def mjpeg_stream_to_h264(url):
                     av_stream.pix_fmt = "yuv420p"
                     av_stream.options = {
                         "tune": "zerolatency",
-                        "preset": "medium",   # Better compression, slower encoding
-                        "g": "60",            # GOP size = 60 frames (1 keyframe every 2 seconds at 30fps)
-                        "bf": "0",      
-                        "flags": "+low_delay"
+                        "preset": "medium",  # Better compression, slower encoding
+                        "g": "60",  # GOP size = 60 frames (1 keyframe every 2 seconds at 30fps)
+                        "bf": "0",
+                        "flags": "+low_delay",
                     }
                     stream_initialized = True
 
@@ -100,7 +100,7 @@ def stream_h264_from_webcam():
     stream.options = {
         "tune": "zerolatency",
         "preset": "ultrafast",
-        "g": "1",  # GOP size = 1 => every frame is a keyframe
+        "g": "60",  # GOP size = 1 => every frame is a keyframe, 60 => every 60 frames has a keyframe
         "bf": "0",  # No B-frames
         "flags": "+low_delay",
     }
@@ -134,19 +134,19 @@ def stream_h264_from_webcam():
 
 if __name__ == "__main__":
     foxglove.set_log_level("DEBUG")
-    writer = foxglove.open_mcap("mjpeg-h264-log.mcap")
+    writer = foxglove.open_mcap("h264-log.mcap")
     server = foxglove.start_server()
 
-    url = "http://oxos-test-server:8081/camera/video/overview"
+    url = "your_url_here"
 
-    for raw_h264_data in mjpeg_stream_to_h264(url):
-        ts = Timestamp.from_epoch_secs(time.time())
-        video_channel.log(
-            CompressedVideo(timestamp=ts, data=raw_h264_data, format="h264")
-        )
-
-    # for raw_h264_data in stream_h264_from_webcam():
+    # for raw_h264_data in mjpeg_stream_to_h264(url):
     #     ts = Timestamp.from_epoch_secs(time.time())
     #     video_channel.log(
     #         CompressedVideo(timestamp=ts, data=raw_h264_data, format="h264")
     #     )
+
+    for raw_h264_data in stream_h264_from_webcam():
+        ts = Timestamp.from_epoch_secs(time.time())
+        video_channel.log(
+            CompressedVideo(timestamp=ts, data=raw_h264_data, format="h264")
+        )
