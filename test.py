@@ -1,70 +1,63 @@
-import subprocess
-import datetime
+import cv2
+import av
+import io
 
-class CompressedVideo:
-    def __init__(self, timestamp, frame_id, data, format):
-        self.timestamp = timestamp
-        self.frame_id = frame_id
-        self.data = data
-        self.format = format
+# Open webcam
+cap = cv2.VideoCapture(0)
+if not cap.isOpened():
+    raise RuntimeError("Could not open webcam")
 
-    def __repr__(self):
-        return f"<CompressedVideo timestamp={self.timestamp} frame_id={self.frame_id} format={self.format} data_len={len(self.data)}>"
+# Set up encoder and output buffer
+output = io.BytesIO()
+codec = 'h264'
 
-def mjpeg_to_h264_stream(url, frame_id='camera_optical_center', format='h264'):
-    """
-    Use ffmpeg to read MJPEG stream and transcode to raw H264 Annex B.
-    Then parse H264 stream by NAL units and yield CompressedVideo frames.
-    """
-    # FFmpeg command:
-    # - Input: MJPEG stream from URL
-    # - Output: raw H264 Annex B stream to stdout
-    # - Copy audio disabled, video transcoded to H264
-    cmd = [
-        'ffmpeg',
-        '-i', url,
-        '-an',  # disable audio
-        '-c:v', 'libx264',
-        '-preset', 'ultrafast',  # low latency
-        '-f', 'h264',
-        '-loglevel', 'quiet',
-        'pipe:1'
-    ]
+# Create an in-memory container to write raw H.264
+output_container = av.open(output, mode='w', format='h264')
+stream = output_container.add_stream(codec, rate=30)
+stream.width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+stream.height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+stream.pix_fmt = 'yuv420p'
 
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=10**7)
+frame_count = 0
+max_frames = 30  # You can increase this
 
-    start_code = b'\x00\x00\x00\x01'
-    buffer = b""
+encoded_data = bytearray()
 
-    while True:
-        chunk = process.stdout.read(4096)
-        if not chunk:
-            break
-        buffer += chunk
+print("[INFO] Capturing and encoding frames...")
 
-        # parse NAL units in buffer
-        while True:
-            first = buffer.find(start_code)
-            if first == -1:
-                break
-            second = buffer.find(start_code, first + 4)
-            if second == -1:
-                # incomplete NAL unit, wait for more data
-                break
+while frame_count < max_frames:
+    ret, frame = cap.read()
+    if not ret:
+        break
 
-            nal_unit = buffer[first:second]
-            buffer = buffer[second:]
+    # Convert BGR (OpenCV) to RGB (PyAV expects RGB input)
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    video_frame = av.VideoFrame.from_ndarray(frame_rgb, format='rgb24')
+    for packet in stream.encode(video_frame):
+        encoded_data.extend(bytes(packet))
+    
+    frame_count += 1
 
-            timestamp = datetime.datetime.utcnow()
-            yield CompressedVideo(timestamp, frame_id, nal_unit, format)
+# Flush encoder
+for packet in stream.encode():
+    encoded_data.extend(bytes(packet))
 
-    process.stdout.close()
-    process.wait()
+output_container.close()
+cap.release()
 
+print(f"[INFO] Captured and encoded {frame_count} frames.")
 
-if __name__ == '__main__':
-    url = "http://oxos-test-server:8081/camera/video/overview"
-    for i, frame in enumerate(mjpeg_to_h264_stream(url)):
-        print(frame)
-        if i >= 10:
-            break
+# Now decode raw H.264 data back to frames
+print("[INFO] Decoding raw H.264 data...")
+decoded_container = av.open(io.BytesIO(encoded_data), format='h264')
+
+frame_number = 0
+for frame in decoded_container.decode(video=0):
+    img = frame.to_ndarray(format='bgr24')
+    cv2.imshow("Decoded Frame", img)
+    if cv2.waitKey(30) & 0xFF == ord('q'):
+        break
+    frame_number += 1
+
+print(f"[INFO] Decoded {frame_number} frames.")
+cv2.destroyAllWindows()
