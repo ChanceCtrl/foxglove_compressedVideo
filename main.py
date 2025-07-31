@@ -76,17 +76,14 @@ def mjpeg_to_h264_stream(url):
     pps = None
     access_unit = []
 
-    def nal_type(nal):
-        return nal[4] & 0x1F if len(nal) > 4 else None
-
-    def flush_unit():
+    def flush_frame():
         if access_unit:
-            full_frame = b"".join(access_unit)
+            full_data = b"".join(access_unit)
             ts = Timestamp.from_epoch_secs(time.time())
-            msg = CompressedVideo(timestamp=ts, data=full_frame, format="h264")
+            msg = CompressedVideo(timestamp=ts, data=full_data, format="h264")
             video_channel.log(msg)
-            access_unit.clear()
             yield msg
+            access_unit.clear()
 
     while True:
         chunk = process.stdout.read(4096)
@@ -104,19 +101,23 @@ def mjpeg_to_h264_stream(url):
                 sps = nal
             elif t == 8:
                 pps = nal
-            elif t in (1, 5):
-                # Start of a new access unit = flush previous
-                yield from flush_unit()
-
-                if t == 5:  # IDR
-                    print("🎯 IDR frame found")
-                    access_unit.extend([sps, pps])  # prepend SPS/PPS
+            elif t == 5:  # IDR
+                # Flush previous access unit
+                yield from flush_frame()
+                print("🎯 IDR frame found")
+                access_unit.extend(filter(None, [sps, pps]))
+                access_unit.append(nal)
+            elif t == 1:  # P/B slice
+                # Flush previous access unit
+                yield from flush_frame()
                 access_unit.append(nal)
             else:
-                # Append slice or filler to current AU
+                # Other NALs (SEI, AUD, etc.)
                 access_unit.append(nal)
 
-    yield from flush_unit()
+    # Final flush
+    yield from flush_frame()
+
     process.stdout.close()
     process.wait()
 
